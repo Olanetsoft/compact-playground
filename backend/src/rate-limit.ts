@@ -1,6 +1,16 @@
 import { getConfig } from "./config.js";
 import type { Context } from "hono";
 
+// Hard cap on distinct buckets per map. Protects against adversarial inputs
+// (e.g. rotating X-Client-ID per request) that would otherwise grow the map
+// until the 5-minute sweep runs. When full, oldest entries are evicted first.
+const MAX_RATE_LIMIT_ENTRIES = 10_000;
+
+// X-Client-ID must be a short opaque token. Reject oversized or non-opaque
+// values so a hostile client can't explode the bucket space with unique keys.
+const CLIENT_ID_MAX_LENGTH = 128;
+const CLIENT_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
 // Sweep expired entries every 5 minutes to prevent unbounded growth
@@ -31,12 +41,25 @@ setInterval(
   5 * 60 * 1000,
 ).unref();
 
+function evictOldestIfFull<V>(map: Map<string, V>, cap: number): void {
+  while (map.size >= cap) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+function isValidClientId(value: string): boolean {
+  return value.length <= CLIENT_ID_MAX_LENGTH && CLIENT_ID_PATTERN.test(value);
+}
+
 export function checkRateLimit(ip: string): boolean {
   const config = getConfig();
   const now = Date.now();
   const record = rateLimitMap.get(ip);
 
   if (!record || now > record.resetTime) {
+    evictOldestIfFull(rateLimitMap, MAX_RATE_LIMIT_ENTRIES);
     rateLimitMap.set(ip, { count: 1, resetTime: now + config.rateWindow });
     return true;
   }
@@ -55,6 +78,7 @@ export function checkArchiveRateLimit(ip: string): boolean {
   const record = archiveRateLimitMap.get(ip);
 
   if (!record || now > record.resetTime) {
+    evictOldestIfFull(archiveRateLimitMap, MAX_RATE_LIMIT_ENTRIES);
     archiveRateLimitMap.set(ip, { count: 1, resetTime: now + config.archiveRateWindow });
     return true;
   }
@@ -97,8 +121,10 @@ function getRuntimeIp(c: Context): string | null {
 export function getClientIp(c: Context): string {
   // X-Client-ID allows proxied clients (e.g. MCP servers) to get
   // per-instance rate limit buckets instead of sharing one IP bucket.
-  const clientId = c.req.header("x-client-id");
-  if (clientId && clientId.trim()) return `client:${clientId.trim()}`;
+  // Invalid values (oversized, non-opaque charset) silently fall through
+  // to IP-based identification rather than 400-ing legitimate clients.
+  const clientId = c.req.header("x-client-id")?.trim();
+  if (clientId && isValidClientId(clientId)) return `client:${clientId}`;
 
   const config = getConfig();
 

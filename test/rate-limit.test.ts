@@ -49,6 +49,36 @@ describe("getClientIp", () => {
       );
       expect(getClientIp(c)).toBe("10.0.0.1");
     });
+
+    it("ignores oversized X-Client-ID (>128 chars) and falls through", () => {
+      const c = mockContext(
+        { "x-client-id": "a".repeat(129) },
+        { incoming: { socket: { remoteAddress: "10.0.0.1" } } },
+      );
+      expect(getClientIp(c)).toBe("10.0.0.1");
+    });
+
+    it("accepts X-Client-ID at the 128-char boundary", () => {
+      const id = "a".repeat(128);
+      const c = mockContext({ "x-client-id": id });
+      expect(getClientIp(c)).toBe(`client:${id}`);
+    });
+
+    it("ignores X-Client-ID with non-opaque characters and falls through", () => {
+      const c = mockContext(
+        { "x-client-id": "my client" },
+        { incoming: { socket: { remoteAddress: "10.0.0.1" } } },
+      );
+      expect(getClientIp(c)).toBe("10.0.0.1");
+    });
+
+    it("ignores X-Client-ID containing shell/path metachars and falls through", () => {
+      const c = mockContext(
+        { "x-client-id": "../etc/passwd" },
+        { incoming: { socket: { remoteAddress: "10.0.0.1" } } },
+      );
+      expect(getClientIp(c)).toBe("10.0.0.1");
+    });
   });
 
   describe("with TRUST_PROXY=true", () => {
@@ -200,6 +230,28 @@ describe("checkRateLimit", () => {
     // Window is 100ms; wait 150ms for it to expire
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(checkRateLimit("192.0.2.6")).toBe(true);
+  });
+
+  it("evicts the oldest bucket once the entry cap is exceeded", () => {
+    // Use a tight window so the cap-triggering loop doesn't accidentally
+    // reuse buckets, and so this test stays fast.
+    process.env.RATE_WINDOW = "60000";
+    resetConfig();
+
+    // Create 10,001 distinct buckets — the cap is 10,000. The first one
+    // created must be evicted, so it gets a fresh count of 1 on re-check.
+    checkRateLimit("evict-me");
+    // Exhaust the first bucket so we can detect whether it was replaced.
+    checkRateLimit("evict-me");
+    checkRateLimit("evict-me");
+
+    for (let i = 0; i < 10_000; i++) {
+      checkRateLimit(`filler-${String(i)}`);
+    }
+
+    // "evict-me" should have been evicted and recreated fresh — so it's
+    // allowed again rather than blocked by its previous count.
+    expect(checkRateLimit("evict-me")).toBe(true);
   });
 });
 
