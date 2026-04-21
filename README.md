@@ -74,21 +74,27 @@ curl http://localhost:8080/compile \
 | `options.skipZk` | boolean | `true` | Skip ZK proof generation (faster, syntax-only) |
 | `options.version` | string | — | Single compiler version (alternative to `versions` array) |
 
-**Response (single version):**
+**Response:** Always `{ results: CompileResult[] }` — single-version requests return a one-element array. Per-result fields include `success`, `output`, `executionTime`, `errors[]`, `warnings[]`, `requestedVersion`, `originalCode`, `wrappedCode`, and (on single-version) a top-level `cacheKey`.
+
 ```json
 {
-  "success": true,
-  "output": "Compilation successful",
-  "executionTime": 3360,
-  "originalCode": "export circuit add...",
-  "wrappedCode": "pragma language_version >= 0.21;\nimport CompactStandardLibrary;\n..."
+  "results": [
+    {
+      "requestedVersion": "default",
+      "success": true,
+      "output": "Compilation successful",
+      "executionTime": 3360,
+      "originalCode": "export circuit add...",
+      "wrappedCode": "pragma language_version >= 0.21;\nimport CompactStandardLibrary;\n..."
+    }
+  ],
+  "cacheKey": "a1b2c3d4-..."
 }
 ```
 
-**Response (multi-version via `versions`):**
+Multi-version example (with `"versions": ["latest", "0.26.0"]`):
 ```json
 {
-  "success": true,
   "results": [
     {"version": "0.30.0", "requestedVersion": "latest", "success": true, "output": "Compilation successful", "executionTime": 3100},
     {"version": "0.26.0", "requestedVersion": "0.26.0", "success": false, "errors": [{"message": "language version 0.18.0 mismatch", "severity": "error"}]}
@@ -472,7 +478,7 @@ Validation: up to 128 characters, restricted to `[A-Za-z0-9._-]`. Values that fa
 ### From v1 (pre-MCP)
 
 - **Node.js 24+** is required (up from 18).
-- **`/compile` response shape changed when using `versions`.** Single-version responses are unchanged. Requests that include a `versions` array (including `"latest"` or `"detect"`) now return `{ results: CompileResult[] }` instead of a flat `CompileResult`. Update consumers to read `body.results[0]` for the first version's output.
+- **`/compile` response shape changed for every request.** The endpoint now always returns `{ results: CompileResult[] }` (plus a top-level `cacheKey` on single-version), replacing the old flat `CompileResult`. Single-version callers must read `body.results[0].success`, `body.results[0].errors`, etc. instead of `body.success`, `body.errors`. Error responses (400/429/500/503) are still the flat `{ success: false, error, message }` shape.
 
 ## Deployment
 
