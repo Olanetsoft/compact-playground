@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { getConfig } from "./config.js";
 
 /**
  * Checks if the Compact compiler is installed and accessible
@@ -13,26 +14,25 @@ export async function isCompilerInstalled(): Promise<boolean> {
 }
 
 /**
- * Gets the version of the installed Compact compiler
+ * Gets the version of the installed Compact CLI
  */
 export async function getCompilerVersion(): Promise<string | null> {
   return new Promise((resolve) => {
-    // Use compactc directly (the actual compiler binary)
-    const compilerPath = process.env.COMPACT_PATH || "compactc";
+    const compactCli = getConfig().compactCliPath;
 
-    const proc = spawn(compilerPath, ["--version"], {
+    const proc = spawn(compactCli, ["--version"], {
       timeout: 5000,
     });
 
     let stdout = "";
 
-    proc.stdout.on("data", (data) => {
+    proc.stdout.on("data", (data: Buffer) => {
       stdout += data.toString();
     });
 
     proc.on("close", (code) => {
       if (code === 0 && stdout) {
-        // Extract version number from output
+        // Expected format: "compact 0.4.0"
         const versionMatch = stdout.match(/(\d+\.\d+\.\d+)/);
         resolve(versionMatch ? versionMatch[1] : stdout.trim());
       } else {

@@ -1,0 +1,122 @@
+import { getConfig } from "./config.js";
+import type { Context } from "hono";
+
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+// Sweep expired entries every 5 minutes to prevent unbounded growth
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [ip, record] of rateLimitMap) {
+      if (now > record.resetTime) {
+        rateLimitMap.delete(ip);
+      }
+    }
+  },
+  5 * 60 * 1000,
+).unref();
+
+const archiveRateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+// Sweep expired archive rate-limit entries every 5 minutes
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [ip, record] of archiveRateLimitMap) {
+      if (now > record.resetTime) {
+        archiveRateLimitMap.delete(ip);
+      }
+    }
+  },
+  5 * 60 * 1000,
+).unref();
+
+export function checkRateLimit(ip: string): boolean {
+  const config = getConfig();
+  const now = Date.now();
+  const record = rateLimitMap.get(ip);
+
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(ip, { count: 1, resetTime: now + config.rateWindow });
+    return true;
+  }
+
+  if (record.count >= config.rateLimit) {
+    return false;
+  }
+
+  record.count++;
+  return true;
+}
+
+export function checkArchiveRateLimit(ip: string): boolean {
+  const config = getConfig();
+  const now = Date.now();
+  const record = archiveRateLimitMap.get(ip);
+
+  if (!record || now > record.resetTime) {
+    archiveRateLimitMap.set(ip, { count: 1, resetTime: now + config.archiveRateWindow });
+    return true;
+  }
+
+  if (record.count >= config.archiveRateLimit) {
+    return false;
+  }
+
+  record.count++;
+  return true;
+}
+
+/**
+ * Best-effort extraction of the runtime-provided client IP from the
+ * server/platform context. With @hono/node-server this is available
+ * via c.env.incoming.socket.remoteAddress. Other adapters may differ,
+ * so this is defensive and returns null when unavailable.
+ */
+function getRuntimeIp(c: Context): string | null {
+  const addr = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)
+    ?.incoming?.socket?.remoteAddress;
+
+  if (typeof addr === "string" && addr.trim()) {
+    return addr.trim();
+  }
+
+  return null;
+}
+
+/**
+ * Extracts a client identity for rate limiting.
+ *
+ * Precedence:
+ * 1. X-Client-ID header (opaque per-instance ID sent by MCP/API clients)
+ * 2. TRUST_CLOUDFLARE=true → CF-Connecting-IP (set by Cloudflare, not spoofable)
+ * 3. TRUST_PROXY=true → x-forwarded-for / x-real-ip (only safe behind a trusted reverse proxy)
+ * 4. Runtime/platform-provided client IP (e.g. Node socket remoteAddress)
+ * 5. "unknown" (safe final fallback)
+ */
+export function getClientIp(c: Context): string {
+  // X-Client-ID allows proxied clients (e.g. MCP servers) to get
+  // per-instance rate limit buckets instead of sharing one IP bucket.
+  const clientId = c.req.header("x-client-id");
+  if (clientId && clientId.trim()) return `client:${clientId.trim()}`;
+
+  const config = getConfig();
+
+  if (config.trustCloudflare) {
+    const cfIp = c.req.header("cf-connecting-ip");
+    if (cfIp) return cfIp.trim();
+  }
+
+  if (config.trustProxy) {
+    const xff = c.req.header("x-forwarded-for");
+    if (xff) return xff.split(",")[0].trim();
+
+    const realIp = c.req.header("x-real-ip");
+    if (realIp) return realIp.trim();
+  }
+
+  const runtimeIp = getRuntimeIp(c);
+  if (runtimeIp) return runtimeIp;
+
+  return "unknown";
+}

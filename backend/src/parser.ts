@@ -2,11 +2,11 @@
  * Parser for Compact compiler error output
  */
 
-export interface CompilerError {
+import type { ExecutableError } from "./types.js";
+
+export interface CompilerError extends ExecutableError {
   line?: number;
   column?: number;
-  message: string;
-  severity: "error" | "warning" | "info";
   file?: string;
 }
 
@@ -28,12 +28,10 @@ export function parseCompilerErrors(output: string): CompilerError[] {
   const lines = output.split("\n");
 
   // Regex patterns for different error formats
-  const exceptionPattern =
-    /Exception:\s*(\S+)\s+line\s+(\d+)\s+char\s+(\d+):/i;
+  const exceptionPattern = /Exception:\s*(\S+)\s+line\s+(\d+)\s+char\s+(\d+):/i;
   const simpleErrorPattern = /^(Error|Warning|Info):\s*(.+)/i;
   const parseErrorPattern = /parse error:\s*(.+)/i;
-  const typeErrorPattern =
-    /expected\s+(.+)\s+to have type\s+(.+)\s+but received\s+(.+)/i;
+  const typeErrorPattern = /expected\s+(.+)\s+to have type\s+(.+)\s+but received\s+(.+)/i;
   const unboundPattern = /unbound identifier\s*"([^"]+)"/i;
 
   let currentError: Partial<CompilerError> | null = null;
@@ -65,10 +63,7 @@ export function parseCompilerErrors(output: string): CompilerError[] {
     // Check for simple error/warning pattern
     const simpleMatch = trimmedLine.match(simpleErrorPattern);
     if (simpleMatch && !currentError) {
-      const severity = simpleMatch[1].toLowerCase() as
-        | "error"
-        | "warning"
-        | "info";
+      const severity = simpleMatch[1].toLowerCase() as "error" | "warning" | "info";
       errors.push({
         message: simpleMatch[2].trim(),
         severity,
@@ -120,11 +115,61 @@ export function parseCompilerErrors(output: string): CompilerError[] {
   // Deduplicate errors
   const seen = new Set<string>();
   return errors.filter((error) => {
-    const key = `${error.line}:${error.column}:${error.message}`;
+    const key = `${String(error.line)}:${String(error.column)}:${error.message}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+export interface CircuitInsight {
+  name: string;
+  k?: number;
+  rows?: number;
+}
+
+export interface CompilerInsights {
+  circuitCount: number;
+  circuits: CircuitInsight[];
+  usesZkProofs: boolean;
+}
+
+/**
+ * Parses compiler output to extract circuit compilation insights.
+ * Returns null if no circuit information is found.
+ */
+export function parseCompilerInsights(output: string): CompilerInsights | null {
+  if (!output || output.trim() === "") {
+    return null;
+  }
+
+  const circuits: CircuitInsight[] = [];
+
+  // Single pattern handles both formats:
+  // - Full: circuit "name" (k=N, rows=N)
+  // - Name-only (skip-zk): Compiled circuit "name"
+  const pattern = /[Cc](?:ompiled\s+)?ircuit\s+"([^"]+)"(?:\s+\(k=(\d+),\s*rows=(\d+)\))?/g;
+
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(output)) !== null) {
+    const insight: CircuitInsight = { name: match[1] };
+    if (match[2]) {
+      insight.k = parseInt(match[2], 10);
+      insight.rows = parseInt(match[3], 10);
+    }
+    circuits.push(insight);
+  }
+
+  if (circuits.length === 0) {
+    return null;
+  }
+
+  return {
+    circuitCount: circuits.length,
+    circuits,
+    usesZkProofs: circuits.some((c) => c.k !== undefined),
+  };
 }
 
 /**
@@ -133,13 +178,13 @@ export function parseCompilerErrors(output: string): CompilerError[] {
 export function formatErrors(errors: CompilerError[]): string {
   return errors
     .map((error) => {
-      let prefix = error.severity === "warning" ? "Warning" : "Error";
+      const prefix = error.severity === "warning" ? "Warning" : "Error";
       let location = "";
 
       if (error.line !== undefined) {
-        location = ` at line ${error.line}`;
+        location = ` at line ${String(error.line)}`;
         if (error.column !== undefined) {
-          location += `, column ${error.column}`;
+          location += `, column ${String(error.column)}`;
         }
       }
 

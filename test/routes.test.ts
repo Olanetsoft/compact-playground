@@ -1,0 +1,793 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { Hono } from "hono";
+
+vi.mock("../backend/src/compiler.js", () => ({
+  compile: vi.fn(),
+}));
+
+vi.mock("../backend/src/formatter.js", () => ({
+  formatCode: vi.fn(),
+}));
+
+vi.mock("../backend/src/analysis/index.js", () => ({
+  analyzeContract: vi.fn(),
+}));
+
+vi.mock("../backend/src/differ.js", () => ({
+  diffContracts: vi.fn(),
+}));
+
+vi.mock("../backend/src/visualizer.js", () => ({
+  generateContractGraph: vi.fn(),
+}));
+
+vi.mock("../backend/src/analysis/parser.js", () => ({
+  parseSource: vi.fn(),
+}));
+
+vi.mock("../backend/src/analysis/semantic-model.js", () => ({
+  buildSemanticModel: vi.fn(),
+}));
+
+vi.mock("../backend/src/rate-limit.js", () => ({
+  checkRateLimit: vi.fn(() => true),
+  getClientIp: vi.fn(() => "test-ip"),
+}));
+
+vi.mock("../backend/src/utils.js", () => ({
+  getCompilerVersion: vi.fn(),
+}));
+
+vi.mock("../backend/src/config.js", () => ({
+  getConfig: vi.fn(() => ({
+    defaultCompilerVersion: "latest",
+    cacheEnabled: false,
+    ozContractsPath: "/opt/oz-compact/contracts/src",
+  })),
+  resetConfig: vi.fn(),
+}));
+
+vi.mock("../backend/src/cache.js", () => ({
+  getFileCache: vi.fn(() => null),
+  generateCacheKey: vi.fn(() => "mock-key"),
+  resetFileCache: vi.fn(),
+}));
+
+vi.mock("../backend/src/version-manager.js", () => ({
+  listInstalledVersions: vi.fn(),
+  buildLanguageVersionMap: vi.fn(),
+  resolveVersion: vi.fn(),
+  getDefaultVersion: vi.fn(),
+}));
+
+vi.mock("../backend/src/middleware.js", () => ({
+  runMultiVersion: vi.fn(),
+}));
+
+import { compile } from "../backend/src/compiler.js";
+import { formatCode } from "../backend/src/formatter.js";
+import { analyzeContract } from "../backend/src/analysis/index.js";
+import { diffContracts } from "../backend/src/differ.js";
+import { generateContractGraph } from "../backend/src/visualizer.js";
+import { parseSource } from "../backend/src/analysis/parser.js";
+import { buildSemanticModel } from "../backend/src/analysis/semantic-model.js";
+import { checkRateLimit, getClientIp } from "../backend/src/rate-limit.js";
+import { getCompilerVersion } from "../backend/src/utils.js";
+import { getConfig } from "../backend/src/config.js";
+import {
+  listInstalledVersions,
+  buildLanguageVersionMap,
+  resolveVersion,
+  getDefaultVersion,
+} from "../backend/src/version-manager.js";
+import { runMultiVersion } from "../backend/src/middleware.js";
+
+const mockGetConfig = getConfig as ReturnType<typeof vi.fn>;
+
+import { compileRoutes } from "../backend/src/routes/compile.js";
+import { formatRoutes } from "../backend/src/routes/format.js";
+import { analyzeRoutes } from "../backend/src/routes/analyze.js";
+import { diffRoutes } from "../backend/src/routes/diff.js";
+import { visualizeRoutes } from "../backend/src/routes/visualize.js";
+import { healthRoutes, warmVersionsCache } from "../backend/src/routes/health.js";
+import { cachedResponseRoutes } from "../backend/src/routes/cached-response.js";
+import { getFileCache } from "../backend/src/cache.js";
+
+const mockCompile = compile as ReturnType<typeof vi.fn>;
+const mockFormatCode = formatCode as ReturnType<typeof vi.fn>;
+const mockAnalyzeContract = analyzeContract as ReturnType<typeof vi.fn>;
+const mockDiffContracts = diffContracts as ReturnType<typeof vi.fn>;
+const mockGenerateContractGraph = generateContractGraph as ReturnType<typeof vi.fn>;
+const mockParseSource = parseSource as ReturnType<typeof vi.fn>;
+const mockBuildSemanticModel = buildSemanticModel as ReturnType<typeof vi.fn>;
+const mockCheckRateLimit = checkRateLimit as ReturnType<typeof vi.fn>;
+const mockGetClientIp = getClientIp as ReturnType<typeof vi.fn>;
+const mockGetCompilerVersion = getCompilerVersion as ReturnType<typeof vi.fn>;
+const mockListInstalledVersions = listInstalledVersions as ReturnType<typeof vi.fn>;
+const mockBuildLanguageVersionMap = buildLanguageVersionMap as ReturnType<typeof vi.fn>;
+const mockResolveVersion = resolveVersion as ReturnType<typeof vi.fn>;
+const mockRunMultiVersion = runMultiVersion as ReturnType<typeof vi.fn>;
+const mockGetDefaultVersion = getDefaultVersion as ReturnType<typeof vi.fn>;
+
+function createApp() {
+  const app = new Hono();
+  app.route("/", compileRoutes);
+  app.route("/", formatRoutes);
+  app.route("/", analyzeRoutes);
+  app.route("/", diffRoutes);
+  app.route("/", visualizeRoutes);
+  app.route("/", healthRoutes);
+  app.route("/", cachedResponseRoutes);
+  return app;
+}
+
+describe("POST /compile", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockCheckRateLimit.mockReturnValue(true);
+    mockGetClientIp.mockReturnValue("test-ip");
+    app = createApp();
+  });
+
+  it("valid code → 200, returns compile result", async () => {
+    const compileResult = {
+      success: true,
+      output: "compiled output",
+      compiledAt: "2024-01-01T00:00:00Z",
+      executionTime: 100,
+    };
+    mockCompile.mockResolvedValue({ result: compileResult, cacheKey: "mock-key" });
+
+    const res = await app.request("/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const results = body.results as Record<string, unknown>[];
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+    expect(results[0].output).toBe("compiled output");
+    expect(results[0].requestedVersion).toBe("default");
+    expect(body.cacheKey).toBe("mock-key");
+    expect(mockCompile).toHaveBeenCalledTimes(1);
+    const [, compileOptions] = mockCompile.mock.calls[0] as [
+      string,
+      { signal?: AbortSignal } | undefined,
+    ];
+    expect(compileOptions).toBeDefined();
+    expect(compileOptions?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("missing code → 400 with validation error", async () => {
+    const res = await app.request("/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: {} }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Invalid request");
+  });
+
+  it("rate limited → 429 'Rate limit exceeded'", async () => {
+    mockCheckRateLimit.mockReturnValue(false);
+
+    const res = await app.request("/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}" }),
+    });
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Rate limit exceeded");
+  });
+
+  it("passes includeBindings option to compile", async () => {
+    const compileResult = {
+      success: true,
+      output: "Compilation successful",
+      compiledAt: "2024-01-01T00:00:00Z",
+      bindings: { "contract.ts": "export class Contract {}" },
+    };
+    mockCompile.mockResolvedValue({ result: compileResult });
+
+    const res = await app.request("/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "export circuit test(): [] {}",
+        options: { includeBindings: true },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const results = body.results as Record<string, unknown>[];
+    expect(results[0].bindings).toEqual({ "contract.ts": "export class Contract {}" });
+    expect(mockCompile).toHaveBeenCalledWith(
+      "export circuit test(): [] {}",
+      expect.objectContaining({ includeBindings: true }),
+    );
+  });
+
+  it("returns insights field when compile result includes insights", async () => {
+    const compileResult = {
+      success: true,
+      output: "Compilation successful",
+      compiledAt: "2024-01-01T00:00:00Z",
+      insights: {
+        circuitCount: 2,
+        circuits: [
+          { name: "transfer", k: 11, rows: 1180 },
+          { name: "approve", k: 8, rows: 512 },
+        ],
+        usesZkProofs: true,
+      },
+    };
+    mockCompile.mockResolvedValue({ result: compileResult });
+
+    const res = await app.request("/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const results = body.results as Record<string, unknown>[];
+    expect(results[0].insights).toBeDefined();
+    const insights = results[0].insights as Record<string, unknown>;
+    expect(insights.circuitCount).toBe(2);
+    expect(insights.usesZkProofs).toBe(true);
+  });
+
+  it("with versions array → 200, calls runMultiVersion", async () => {
+    const multiVersionResults = [
+      {
+        version: "0.29.0",
+        requestedVersion: "0.29.0",
+        success: true,
+        compilerVersion: "0.29.0",
+        compiledAt: "2024-01-01T00:00:00Z",
+      },
+      {
+        version: "0.28.0",
+        requestedVersion: "0.28.0",
+        success: true,
+        compilerVersion: "0.28.0",
+        compiledAt: "2024-01-01T00:00:00Z",
+      },
+    ];
+    mockRunMultiVersion.mockResolvedValue(multiVersionResults);
+
+    const res = await app.request("/compile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "export circuit test(): [] {}",
+        versions: ["0.29.0", "0.28.0"],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const results = body.results as Record<string, unknown>[];
+    expect(results).toHaveLength(2);
+    expect(results[0].requestedVersion).toBe("0.29.0");
+    expect(results[0].compilerVersion).toBe("0.29.0");
+    expect(results[0].success).toBe(true);
+    // version field from runMultiVersion should be stripped
+    expect(results[0]).not.toHaveProperty("version");
+    expect(body).not.toHaveProperty("success");
+    expect(mockRunMultiVersion).toHaveBeenCalled();
+  });
+});
+
+describe("POST /format", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockCheckRateLimit.mockReturnValue(true);
+    mockGetClientIp.mockReturnValue("test-ip");
+    app = createApp();
+  });
+
+  it("valid code → 200, returns format result", async () => {
+    const formatResult = { success: true, formatted: "formatted code" };
+    mockFormatCode.mockResolvedValue({ result: formatResult, cacheKey: "mock-key" });
+
+    const res = await app.request("/format", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    const results = body.results as Record<string, unknown>[];
+    expect(results).toHaveLength(1);
+    expect(results[0].success).toBe(true);
+    expect(results[0].formatted).toBe("formatted code");
+    expect(results[0].requestedVersion).toBe("default");
+    expect(body.cacheKey).toBe("mock-key");
+  });
+
+  it("missing code → 400", async () => {
+    const res = await app.request("/format", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ options: {} }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+  });
+
+  it("rate limited → 429", async () => {
+    mockCheckRateLimit.mockReturnValue(false);
+
+    const res = await app.request("/format", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}" }),
+    });
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Rate limit exceeded");
+  });
+});
+
+describe("POST /analyze", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockCheckRateLimit.mockReturnValue(true);
+    mockGetClientIp.mockReturnValue("test-ip");
+    app = createApp();
+  });
+
+  it("mode=fast → 200, returns canonical analysis response", async () => {
+    const analysisResult = {
+      success: true,
+      mode: "fast",
+      diagnostics: [],
+      summary: {
+        hasLedger: false,
+        hasCircuits: true,
+        hasWitnesses: false,
+        totalLines: 1,
+        publicCircuits: 1,
+        privateCircuits: 0,
+        publicState: 0,
+        privateState: 0,
+      },
+      structure: {
+        imports: [],
+        exports: ["test"],
+        ledger: [],
+        circuits: [
+          {
+            name: "test",
+            isPublic: true,
+            isPure: false,
+            parameters: [],
+            returnType: "[]",
+            location: { line: 1, column: 0, offset: 0 },
+          },
+        ],
+        witnesses: [],
+        types: [],
+      },
+      facts: { hasStdLibImport: false, unusedWitnesses: [] },
+      findings: [],
+      recommendations: [],
+      circuits: [],
+    };
+    mockAnalyzeContract.mockResolvedValue({ result: analysisResult });
+
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}", mode: "fast" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(body.mode).toBe("fast");
+    expect(body.summary).toBeDefined();
+    expect(body.structure).toBeDefined();
+    expect(body.findings).toBeDefined();
+    expect(body.recommendations).toBeDefined();
+  });
+
+  it("mode=deep → 200, returns analysis with compilations", async () => {
+    const analysisResult = {
+      success: true,
+      mode: "deep",
+      diagnostics: [],
+      summary: {
+        hasLedger: false,
+        hasCircuits: true,
+        hasWitnesses: false,
+        totalLines: 1,
+        publicCircuits: 1,
+        privateCircuits: 0,
+        publicState: 0,
+        privateState: 0,
+      },
+      structure: { imports: [], exports: [], ledger: [], circuits: [], witnesses: [], types: [] },
+      facts: { hasStdLibImport: false, unusedWitnesses: [] },
+      findings: [],
+      recommendations: [],
+      circuits: [],
+      compilations: [
+        { success: true, diagnostics: [], executionTime: 50, requestedVersion: "default" },
+      ],
+    };
+    mockAnalyzeContract.mockResolvedValue({ result: analysisResult });
+
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}", mode: "deep" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(body.mode).toBe("deep");
+    expect(body.compilations).toBeDefined();
+    expect((body.compilations as unknown[]).length).toBe(1);
+  });
+
+  it("invalid mode → 400 with validation error", async () => {
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}", mode: "invalid" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Invalid request");
+  });
+
+  it("missing code → 400", async () => {
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "fast" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+  });
+
+  it("rate limited → 429", async () => {
+    mockCheckRateLimit.mockReturnValue(false);
+
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "test", mode: "fast" }),
+    });
+
+    expect(res.status).toBe(429);
+  });
+
+  it("accepts circuit filter parameter", async () => {
+    mockAnalyzeContract.mockResolvedValue({
+      result: { success: true, mode: "fast", circuits: [] },
+    });
+
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "test", mode: "fast", circuit: "myCircuit" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(mockAnalyzeContract).toHaveBeenCalledWith(
+      "test",
+      expect.objectContaining({ circuit: "myCircuit" }),
+    );
+  });
+});
+
+describe("POST /diff", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockCheckRateLimit.mockReturnValue(true);
+    mockGetClientIp.mockReturnValue("test-ip");
+    app = createApp();
+  });
+
+  it("valid before+after → 200", async () => {
+    const diffResult = {
+      success: true,
+      hasChanges: false,
+      circuits: {},
+      ledger: {},
+      pragma: {},
+      imports: {},
+    };
+    mockDiffContracts.mockResolvedValue({ result: diffResult, cacheKey: "mock-key" });
+
+    const res = await app.request("/diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ before: "old code", after: "new code" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(body.cacheKey).toBe("mock-key");
+  });
+
+  it("missing before → 400 with validation error", async () => {
+    const res = await app.request("/diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ after: "new code" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Invalid request");
+  });
+
+  it("missing after → 400 with validation error", async () => {
+    const res = await app.request("/diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ before: "old code" }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Invalid request");
+  });
+
+  it("rate limited → 429", async () => {
+    mockCheckRateLimit.mockReturnValue(false);
+
+    const res = await app.request("/diff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ before: "old code", after: "new code" }),
+    });
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Rate limit exceeded");
+  });
+});
+
+describe("GET /health", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockGetConfig.mockReturnValue({
+      defaultCompilerVersion: "latest",
+      cacheEnabled: false,
+      ozContractsPath: "/opt/oz-compact/contracts/src",
+    });
+    app = createApp();
+  });
+
+  it("returns status, compactCli, defaultVersion, timestamp", async () => {
+    mockGetCompilerVersion.mockResolvedValue("0.29.0");
+    mockListInstalledVersions.mockResolvedValue(["0.29.0", "0.28.0"]);
+    mockGetDefaultVersion.mockResolvedValue("0.29.0");
+
+    const res = await app.request("/health", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).toBe("healthy");
+    expect(body.compactCli).toBeDefined();
+    const compactCli = body.compactCli as Record<string, unknown>;
+    expect(compactCli.installed).toBe(true);
+    expect(compactCli.version).toBe("0.29.0");
+    expect(body.defaultVersion).toBeDefined();
+    expect(body.timestamp).toBeDefined();
+  });
+});
+
+describe("GET /versions", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    app = createApp();
+  });
+
+  it("returns default + installed with language versions", async () => {
+    mockListInstalledVersions.mockResolvedValue(["0.29.0", "0.28.0"]);
+    mockResolveVersion.mockReturnValue("0.29.0");
+    mockBuildLanguageVersionMap.mockResolvedValue(
+      new Map([
+        ["0.29.0", "1.0"],
+        ["0.28.0", "0.9"],
+      ]),
+    );
+
+    // Warm the cache before requesting (simulates startup)
+    await warmVersionsCache();
+
+    const res = await app.request("/versions", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.default).toBe("0.29.0");
+    expect(Array.isArray(body.installed)).toBe(true);
+    const installed = body.installed as Array<Record<string, unknown>>;
+    expect(installed).toHaveLength(2);
+    expect(installed[0].version).toBe("0.29.0");
+    expect(installed[0].languageVersion).toBe("1.0");
+  });
+});
+
+describe("POST /visualize", () => {
+  let app: Hono;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockCheckRateLimit.mockReturnValue(true);
+    mockGetClientIp.mockReturnValue("test-ip");
+    mockParseSource.mockReturnValue({});
+    mockBuildSemanticModel.mockReturnValue({});
+    app = createApp();
+  });
+
+  it("valid code → 200, returns graph", async () => {
+    const graphResult = {
+      nodes: [{ id: "circuit:test", type: "circuit", label: "test" }],
+      edges: [],
+      groups: [],
+      mermaid: 'graph TD\n  circuit_test[["test()"]]',
+    };
+    mockGenerateContractGraph.mockReturnValue(graphResult);
+
+    const res = await app.request("/visualize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "export circuit test(): [] {}" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(body.graph).toBeDefined();
+  });
+
+  it("missing code → 400", async () => {
+    const res = await app.request("/visualize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rate limited → 429", async () => {
+    mockCheckRateLimit.mockReturnValue(false);
+
+    const res = await app.request("/visualize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "test" }),
+    });
+
+    expect(res.status).toBe(429);
+  });
+});
+
+describe("GET /cached-response/:hash", () => {
+  let app: Hono;
+  const validCacheToken = "123e4567-e89b-42d3-a456-426614174000";
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockCheckRateLimit.mockReturnValue(true);
+    mockGetClientIp.mockReturnValue("test-ip");
+    app = createApp();
+  });
+
+  it("returns cached data when hash exists", async () => {
+    const mockCache = {
+      getByPublicId: vi.fn().mockResolvedValue({ success: true, output: "cached result" }),
+    };
+    (getFileCache as ReturnType<typeof vi.fn>).mockReturnValue(mockCache);
+
+    const res = await app.request(`/cached-response/${validCacheToken}`, { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(body.output).toBe("cached result");
+    expect(mockCache.getByPublicId).toHaveBeenCalledWith(validCacheToken);
+  });
+
+  it("returns 404 when hash not found", async () => {
+    const mockCache = {
+      getByPublicId: vi.fn().mockResolvedValue(undefined),
+    };
+    (getFileCache as ReturnType<typeof vi.fn>).mockReturnValue(mockCache);
+
+    const res = await app.request(`/cached-response/${validCacheToken}`, { method: "GET" });
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.message).toContain("not found");
+  });
+
+  it("returns 404 when caching is disabled", async () => {
+    (getFileCache as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+    const res = await app.request(`/cached-response/${validCacheToken}`, { method: "GET" });
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+  });
+
+  it("returns 404 for invalid hash format", async () => {
+    const res = await app.request("/cached-response/not-a-valid-hash", { method: "GET" });
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+  });
+
+  it("rate limited → 429", async () => {
+    mockCheckRateLimit.mockReturnValue(false);
+
+    const res = await app.request(`/cached-response/${validCacheToken}`, { method: "GET" });
+
+    expect(res.status).toBe(429);
+  });
+
+  it("returns generic 500 without leaking internal error details", async () => {
+    const mockCache = {
+      getByPublicId: vi.fn().mockRejectedValue(new Error("ENOENT: /data/cache/internal/path.json")),
+    };
+    (getFileCache as ReturnType<typeof vi.fn>).mockReturnValue(mockCache);
+
+    const res = await app.request(`/cached-response/${validCacheToken}`, { method: "GET" });
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(false);
+    expect(body.error).toBe("Internal server error");
+    expect(body.message).toBe("An unexpected error occurred during processing");
+    expect(JSON.stringify(body)).not.toContain("ENOENT");
+    expect(JSON.stringify(body)).not.toContain("/data/cache");
+  });
+});

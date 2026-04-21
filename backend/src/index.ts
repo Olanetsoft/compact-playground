@@ -1,170 +1,198 @@
+import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import type { Server } from "node:http";
+import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
-import { compile } from "./compiler.js";
-import { getCompilerVersion, isCompilerInstalled } from "./utils.js";
+import { getConfig } from "./config.js";
+import { setupLogging, startupLog } from "./logger.js";
+import { compileRoutes } from "./routes/compile.js";
+import { archiveCompileRoutes } from "./routes/compile-archive.js";
+import { formatRoutes } from "./routes/format.js";
+import { analyzeRoutes } from "./routes/analyze.js";
+import { diffRoutes } from "./routes/diff.js";
+import { visualizeRoutes } from "./routes/visualize.js";
+import { cachedResponseRoutes } from "./routes/cached-response.js";
+import { proveRoutes } from "./routes/prove.js";
+import { createJsonBodyLimit, validateRequestBody } from "./middleware.js";
+import { validateStartup } from "./startup.js";
+import { sweepStaleTempDirs } from "./temp-sweeper.js";
+import { isShuttingDown, registerShutdownHandlers } from "./shutdown.js";
+import { healthRoutes, warmVersionsCache } from "./routes/health.js";
+import { getFileCache } from "./cache.js";
+
+let pkgVersion = "unknown";
+try {
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf-8")) as {
+    version?: string;
+  };
+  pkgVersion = pkg.version || pkgVersion;
+} catch {
+  // Fall back to "unknown" if package.json is unavailable at runtime.
+}
 
 const app = new Hono();
 
+// Initialize structured logging
+await setupLogging();
+
 // Middleware
-app.use("*", logger());
 app.use(
   "*",
   cors({
     origin: "*",
-    allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["Content-Type"],
-  })
+    allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "X-Client-ID", "X-Request-Id"],
+    exposeHeaders: ["X-Request-Id"],
+  }),
 );
 
-// Rate limiting state (simple in-memory implementation)
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
-const RATE_LIMIT = 20; // requests per minute
-const RATE_WINDOW = 60 * 1000; // 1 minute in ms
-
-// Clean up expired rate limit entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, record] of rateLimitMap) {
-    if (now > record.resetTime) {
-      rateLimitMap.delete(ip);
-    }
-  }
-}, 5 * 60 * 1000);
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const record = rateLimitMap.get(ip);
-
-  if (!record || now > record.resetTime) {
-    rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_WINDOW });
-    return true;
-  }
-
-  if (record.count >= RATE_LIMIT) {
-    return false;
-  }
-
-  record.count++;
-  return true;
-}
-
-// Health check endpoint
-app.get("/health", async (c) => {
-  const compilerInstalled = await isCompilerInstalled();
-  const version = compilerInstalled ? await getCompilerVersion() : null;
-
-  return c.json({
-    status: compilerInstalled ? "healthy" : "degraded",
-    compiler: {
-      installed: compilerInstalled,
-      version: version,
-    },
-    timestamp: new Date().toISOString(),
-  });
+app.use("*", async (c, next) => {
+  const requestId = c.req.header("x-request-id")?.trim() || randomUUID();
+  c.header("X-Request-Id", requestId);
+  await next();
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("X-Frame-Options", "DENY");
+  c.header("Cache-Control", "no-store");
 });
 
-// Version endpoint
-app.get("/version", async (c) => {
-  const version = await getCompilerVersion();
-  return c.json({
-    service: "compact-playground",
-    serviceVersion: "1.0.0",
-    compilerVersion: version || "unknown",
-  });
+// Reject new requests during shutdown (before any body parsing)
+app.use("*", async (c, next) => {
+  if (isShuttingDown()) {
+    return c.json({ success: false, error: "Service is shutting down" }, 503);
+  }
+  return next();
 });
 
-// Main compile endpoint
-app.post("/compile", async (c) => {
-  // Rate limiting
-  const ip =
-    c.req.header("x-forwarded-for") ||
-    c.req.header("x-real-ip") ||
-    "unknown";
+app.use("*", createJsonBodyLimit());
+app.use("*", validateRequestBody);
 
-  if (!checkRateLimit(ip)) {
-    return c.json(
-      {
-        success: false,
-        error: "Rate limit exceeded",
-        message: "Too many requests. Please wait a minute before trying again.",
-      },
-      429
-    );
-  }
+// Mount routes
+app.route("/", compileRoutes);
+app.route("/", archiveCompileRoutes);
+app.route("/", formatRoutes);
+app.route("/", analyzeRoutes);
+app.route("/", diffRoutes);
+app.route("/", visualizeRoutes);
+app.route("/", cachedResponseRoutes);
+app.route("/", proveRoutes);
 
-  try {
-    const body = await c.req.json();
-    const { code, options = {} } = body;
-
-    if (!code || typeof code !== "string") {
-      return c.json(
-        {
-          success: false,
-          error: "Invalid request",
-          message: "Code is required and must be a string",
-        },
-        400
-      );
-    }
-
-    // Limit code size (100KB max)
-    if (code.length > 100 * 1024) {
-      return c.json(
-        {
-          success: false,
-          error: "Code too large",
-          message: "Code must be less than 100KB",
-        },
-        400
-      );
-    }
-
-    const result = await compile(code, options);
-    return c.json(result);
-  } catch (error) {
-    console.error("Compilation error:", error);
-    return c.json(
-      {
-        success: false,
-        error: "Internal server error",
-        message:
-          error instanceof Error ? error.message : "An unknown error occurred",
-      },
-      500
-    );
-  }
-});
+app.route("/", healthRoutes);
 
 // Root endpoint
 app.get("/", (c) => {
   return c.json({
     name: "Compact Playground API",
-    version: "1.0.0",
-    description: "Compile and validate Compact smart contracts",
+    version: pkgVersion,
+    description: "Compile, format, analyze, and diff Compact smart contracts",
     endpoints: {
-      "POST /compile": "Compile Compact code",
+      "POST /compile": 'Compile Compact code (versions: ["latest", "detect", or specific])',
+      "POST /format": 'Format Compact code (versions: ["latest", "detect", or specific])',
+      "POST /analyze":
+        'Analyze contract structure (fast/deep, versions: ["latest", "detect", or specific])',
+      "POST /compile/archive": "Compile multi-file Compact archives (.tar.gz)",
+      "POST /diff": "Semantic diff between contract versions",
+      "POST /visualize": "Generate visual graph of contract architecture",
+      "GET /versions": "List installed compiler versions with language version mapping",
       "GET /health": "Check service health",
-      "GET /version": "Get version information",
+      "GET /cached-response/:hash": "Retrieve a cached response by its opaque cache token",
+      "POST /prove": "Visualize ZK privacy boundaries and proof flow for a contract",
     },
-    documentation: "https://github.com/Olanetsoft/learn-compact",
   });
 });
 
 // Start server
-const port = parseInt(process.env.PORT || "8080", 10);
+const port = getConfig().port;
 
-console.log(`
-╔═══════════════════════════════════════════════════╗
-║           Compact Playground API                  ║
-║           Starting on port ${port}                    ║
-╚═══════════════════════════════════════════════════╝
-`);
+startupLog.info("Compact Playground API starting on port {port}", { port });
 
-serve({
+// Validate critical runtime dependencies before accepting traffic
+const startupCheck = await validateStartup();
+if (!startupCheck.ok) {
+  for (const error of startupCheck.errors) {
+    startupLog.error("STARTUP ERROR: {error}", { error });
+  }
+  process.exit(1);
+}
+startupLog.info("Startup validation passed");
+
+// Sweep stale temp directories at startup and periodically
+const SWEEP_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+sweepStaleTempDirs()
+  .then(({ swept, errors }) => {
+    if (swept > 0 || errors > 0) {
+      startupLog.info("Startup temp sweep: {swept} removed, {errors} errors", { swept, errors });
+    }
+  })
+  .catch((err: unknown) => {
+    startupLog.warn("Failed to sweep temp directories: {error}", { error: String(err) });
+  });
+setInterval(() => {
+  sweepStaleTempDirs()
+    .then(({ swept, errors }) => {
+      if (swept > 0 || errors > 0) {
+        startupLog.info("Periodic temp sweep: {swept} removed, {errors} errors", { swept, errors });
+      }
+    })
+    .catch((err: unknown) => {
+      startupLog.warn("Periodic temp sweep failed: {error}", { error: String(err) });
+    });
+}, SWEEP_INTERVAL_MS).unref();
+
+const config = getConfig();
+if (config.usingEphemeralCacheSalt) {
+  startupLog.warn(
+    "CACHE_KEY_SALT is not set. Using an ephemeral cache salt for this process and " +
+      "clearing persisted cache on startup. Cache lookups will not survive restart.",
+  );
+
+  try {
+    const entries = await readdir(config.cacheDir);
+    await Promise.all(
+      entries.map((entry) => rm(join(config.cacheDir, entry), { recursive: true, force: true })),
+    );
+  } catch {
+    // Directory may not exist (e.g. deleted by a prior version). Recreate it.
+    try {
+      await mkdir(config.cacheDir, { recursive: true });
+    } catch (mkdirErr: unknown) {
+      startupLog.warn("Failed to recreate cache directory {dir}: {error}", {
+        dir: config.cacheDir,
+        error: String(mkdirErr),
+      });
+    }
+  }
+}
+
+// Initialize file cache and warm versions cache at startup
+const fileCache = getFileCache();
+if (fileCache) {
+  try {
+    await fileCache.init();
+    startupLog.info("File cache initialized");
+  } catch (err: unknown) {
+    startupLog.warn("Failed to initialize file cache: {error}", { error: String(err) });
+  }
+}
+
+warmVersionsCache()
+  .then(() => {
+    startupLog.info("Versions cache warmed");
+  })
+  .catch((err: unknown) => {
+    startupLog.warn("Failed to warm versions cache: {error}", { error: String(err) });
+  });
+
+const server = serve({
   fetch: app.fetch,
   port,
-});
+}) as Server;
 
-console.log(`Server running at http://localhost:${port}`);
+server.requestTimeout = 60_000;
+server.headersTimeout = 10_000;
+
+registerShutdownHandlers(server);
+
+startupLog.info("Server running at http://localhost:{port}", { port });
