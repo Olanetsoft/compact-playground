@@ -154,6 +154,12 @@ describe("POST /compile", () => {
     expect(results[0].output).toBe("compiled output");
     expect(results[0].requestedVersion).toBe("default");
     expect(body.cacheKey).toBe("mock-key");
+    // Back-compat: single-version responses also splat the result fields to
+    // the top level so consumers written against the original flat shape
+    // (midnight-mcp, mdBook integration) keep working.
+    expect(body.success).toBe(true);
+    expect(body.output).toBe("compiled output");
+    expect(body.requestedVersion).toBe("default");
     expect(mockCompile).toHaveBeenCalledTimes(1);
     const [, compileOptions] = mockCompile.mock.calls[0] as [
       string,

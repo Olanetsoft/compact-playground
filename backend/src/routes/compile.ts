@@ -58,10 +58,15 @@ compileRoutes.post("/compile", async (c) => {
       return c.json({ results });
     }
 
-    // Single version
+    // Single version. Splat the CompileResult to the top level for backward
+    // compatibility with consumers written against the original flat shape
+    // (e.g. midnight-mcp, the mdBook integration), and also expose it under
+    // `results[]` so callers can use the unified multi-version shape.
     const { result, cacheKey } = await compile(code, { ...options, signal });
+    const enrichedResult = { ...result, requestedVersion: options.version ?? "default" };
     return c.json({
-      results: [{ ...result, requestedVersion: options.version ?? "default" }],
+      ...enrichedResult,
+      results: [enrichedResult],
       cacheKey,
     });
   } catch (error) {

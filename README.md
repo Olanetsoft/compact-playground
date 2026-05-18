@@ -74,29 +74,31 @@ curl http://localhost:8080/compile \
 | `options.skipZk` | boolean | `true` | Skip ZK proof generation (faster, syntax-only) |
 | `options.version` | string | — | Single compiler version (alternative to `versions` array) |
 
-**Response:** Always `{ results: CompileResult[] }` — single-version requests return a one-element array. Per-result fields include `success`, `output`, `executionTime`, `errors[]`, `warnings[]`, `requestedVersion`, `originalCode`, `wrappedCode`, and (on single-version) a top-level `cacheKey`.
+**Response (single-version — no `versions` array in request):** Result fields are exposed at both the top level (legacy flat shape) and inside `results[0]`. Either form is supported indefinitely; legacy consumers read top-level `success` / `errors`, newer consumers read `results[0]`.
 
 ```json
 {
+  "success": true,
+  "compilerVersion": "0.31.0",
+  "requestedVersion": "default",
+  "output": "Compilation successful",
+  "executionTime": 3360,
+  "compiledAt": "2026-05-18T16:00:00.000Z",
+  "originalCode": "export circuit add...",
+  "wrappedCode": "pragma language_version >= 0.14;\nimport CompactStandardLibrary;\n...",
   "results": [
-    {
-      "requestedVersion": "default",
-      "success": true,
-      "output": "Compilation successful",
-      "executionTime": 3360,
-      "originalCode": "export circuit add...",
-      "wrappedCode": "pragma language_version >= 0.21;\nimport CompactStandardLibrary;\n..."
-    }
+    { "success": true, "compilerVersion": "0.31.0", "requestedVersion": "default", "output": "Compilation successful", "executionTime": 3360, "...": "..." }
   ],
   "cacheKey": "a1b2c3d4-..."
 }
 ```
 
-Multi-version example (with `"versions": ["latest", "0.26.0"]`):
+**Response (multi-version — request includes `versions: [...]`):** Only the `results` array is populated; per-version output is keyed by `requestedVersion`.
+
 ```json
 {
   "results": [
-    {"version": "0.30.0", "requestedVersion": "latest", "success": true, "output": "Compilation successful", "executionTime": 3100},
+    {"version": "0.31.0", "requestedVersion": "latest", "success": true, "output": "Compilation successful", "executionTime": 3100},
     {"version": "0.26.0", "requestedVersion": "0.26.0", "success": false, "errors": [{"message": "language version 0.18.0 mismatch", "severity": "error"}]}
   ]
 }
@@ -478,7 +480,7 @@ Validation: up to 128 characters, restricted to `[A-Za-z0-9._-]`. Values that fa
 ### From v1 (pre-MCP)
 
 - **Node.js 24+** is required (up from 18).
-- **`/compile` response shape changed for every request.** The endpoint now always returns `{ results: CompileResult[] }` (plus a top-level `cacheKey` on single-version), replacing the old flat `CompileResult`. Single-version callers must read `body.results[0].success`, `body.results[0].errors`, etc. instead of `body.success`, `body.errors`. Error responses (400/429/500/503) are still the flat `{ success: false, error, message }` shape.
+- **`/compile` multi-version responses use the `{ results: CompileResult[] }` shape.** Single-version requests (no `versions` array) keep the original flat shape *and* additionally expose `results[0]` so callers can opt in to the unified shape. Both old and new consumers continue to work without changes. Error responses (400/429/500/503) are still the flat `{ success: false, error, message }` shape.
 
 ## Deployment
 
