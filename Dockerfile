@@ -45,8 +45,8 @@ WORKDIR /app
 ENV HOME="/root"
 RUN mkdir -p /root/.compact/bin
 
-# Download Compact CLI tool (compact-v0.5.0)
-RUN curl -fsSL https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.0/compact-x86_64-unknown-linux-musl.tar.xz \
+# Download Compact CLI tool (compact-v0.5.1)
+RUN curl -fsSL https://github.com/midnightntwrk/compact/releases/download/compact-v0.5.1/compact-x86_64-unknown-linux-musl.tar.xz \
        -o /tmp/compact.tar.xz \
     && mkdir -p /tmp/compact-extract \
     && tar -xJf /tmp/compact.tar.xz -C /tmp/compact-extract \
@@ -61,7 +61,8 @@ ENV PATH="/root/.compact/bin:$PATH"
 ARG DEFAULT_COMPILER=latest
 
 # Pre-install all available compiler versions
-RUN compact update 0.30.0 \
+RUN compact update 0.31.0 \
+    && compact update 0.30.0 \
     && compact update 0.29.0 \
     && compact update 0.28.0 \
     && compact update 0.26.0 \
@@ -70,11 +71,11 @@ RUN compact update 0.30.0 \
     && compact update 0.23.0 \
     && compact update 0.22.0
 
-# Set the CLI default — explicit version or latest (0.30.0)
+# Set the CLI default — explicit version or latest (0.31.0)
 RUN if [ "$DEFAULT_COMPILER" != "latest" ]; then \
       compact update "$DEFAULT_COMPILER"; \
     else \
-      compact update 0.30.0; \
+      compact update 0.31.0; \
     fi
 
 # Verify installation
@@ -106,7 +107,7 @@ ENV PATH="/home/appuser/.compact/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
 RUN if [ "$DEFAULT_COMPILER" != "latest" ]; then \
       compact update "$DEFAULT_COMPILER"; \
     else \
-      compact update 0.30.0; \
+      compact update 0.31.0; \
     fi && compact list --installed
 
 # Environment variables
